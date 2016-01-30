@@ -1,0 +1,6 @@
+.DS_Store
+
+# Eagle
+*.b#*
+*.s#*
+*.lck
