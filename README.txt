@@ -13,13 +13,13 @@ License:  BSD(LICENSE)
     files in https://github.com/devalfrz/arduino-lockitron-nfc).
 
     Buttons: (buttons are set to have a pullup resistor so they ar inverted)
-      - SLOT_SELECT: Selects a memory slot. STATUS_LED will blink n times depending
-          on the slot that has been selected.
-            
-      - MEMORY_BUTTON: If it's pressed for 3 seconds while a card is read,
-          it will either override the selected slot or delete the card if it
-          was already registered.
-
       - LOCK_UNLOCK: This button will lock or unlock the system depending on its
           previous state.
+          
+      - SAVE_CARD: If it's pressed for 3 seconds while a card is read,
+          it will either save the current card and blink 3 times or delete the
+          card and blink one time for 2 seconds.
+          
+      - RESET_MEMORY: Keep this button pressed and this will clear all cards in
+          memory.
           
