@@ -11,15 +11,15 @@
     files in https://github.com/devalfrz/arduino-lockitron-nfc).
 
     Buttons: (buttons are set to have a pullup resistor so they ar inverted)
-      - SLOT_SELECT: Selects a memory slot. STATUS_LED will blink n times depending
-          on the slot that has been selected.
-            
-      - MEMORY_BUTTON: If it's pressed for 3 seconds while a card is read,
-          it will either override the selected slot or delete the card if it
-          was already registered.
-
       - LOCK_UNLOCK: This button will lock or unlock the system depending on its
           previous state.
+          
+      - SAVE_CARD: If it's pressed for 3 seconds while a card is read,
+          it will either save the current card and blink 3 times or delete the
+          card and blink one time for 2 seconds.
+          
+      - SLOT_SELECT: Keep this button pressed and this will clear all cards in
+          memory.
           
 
 */
@@ -27,13 +27,13 @@
 
 /**** INPUTS/OUTPUTS ****/
 // Adafruit PN532 breakout board:
-#define PN532_SCK  18
-#define PN532_MOSI 17
-#define PN532_SS   16
-#define PN532_MISO 19
+#define PN532_SCK  A4
+#define PN532_MOSI A3
+#define PN532_SS   A2
+#define PN532_MISO A5
 // Buttons
 #define SLOT_SELECT 10
-#define MEMORY_BUTTON 9
+#define SAVE_CARD 9
 #define STATUS_LED 13
 #define UNLOCKED 12
 #define LOCKED 11
@@ -45,7 +45,7 @@
 #define LOCK_UNLOCK 8
 
 /**** Other definitions ****/
-#define TOTAL_SLOTS 4 // Arbitrary number of slots available
+#define TOTAL_SLOTS 64 // Arbitrary number of slots available
 #define SLOT_SIZE 4
 //#define DEBUG // Will show output on terminal
 
@@ -66,7 +66,7 @@ boolean state = 0;
 
 
 void setup(void) {
-  pinMode(MEMORY_BUTTON,INPUT_PULLUP);
+  pinMode(SAVE_CARD,INPUT_PULLUP);
   pinMode(SLOT_SELECT,INPUT_PULLUP);
   pinMode(STATUS_LED,OUTPUT);
   pinMode(LOCKED,OUTPUT);
@@ -116,7 +116,7 @@ void loop(void) {
   // if the uid is 4 bytes (Mifare Classic) or 7 bytes (Mifare Ultralight)
   success = nfc.readPassiveTargetID(PN532_MIFARE_ISO14443A, uid, &uidLength,100);
   
-  save_delete = (success && !digitalRead(MEMORY_BUTTON)) ? 1 : 0;
+  save_delete = (success && !digitalRead(SAVE_CARD)) ? 1 : 0;
   
   if (success) {
     digitalWrite(STATUS_LED,HIGH);
@@ -130,30 +130,31 @@ void loop(void) {
     nfc.PrintHex(uid, uidLength);
     Serial.println("");
     #endif
-    for(i=0;i<TOTAL_SLOTS;i++){ //Check all memory slots
-      if(check_card(uid,i))
-        access_granted = 1;
-    }
+    memory_slot = check_card(uid);
+    access_granted = (memory_slot == -1) ? 0 : 1;
+    
     if(save_delete){
       access_granted = 0; //Reset Access
       #ifdef DEBUG
       Serial.println("Continue pressing to save or delete card");
       #endif
       delay(3000);
-      if(!digitalRead(MEMORY_BUTTON)){
-        if(save_delete_card(uid,memory_slot)){
+      if(!digitalRead(SAVE_CARD)){
+        if(memory_slot == -1){
+          memory_slot = save_card(uid);
           #ifdef DEBUG
           Serial.print("Save Card Slot: ");
-          Serial.println(memory_slot);
+          Serial.println(memory_slot+1);
+          blink_n_times(memory_slot+1,STATUS_LED,250);
+          delay(1000);
           #endif
-          blink_n_times(memory_slot+1,STATUS_LED);
+          blink_n_times(3,STATUS_LED,100);
         }else{
+          delete_card(memory_slot);
           #ifdef DEBUG
-          Serial.println("Delete Card");
+          Serial.println("Card deleted!");
           #endif
-          digitalWrite(STATUS_LED,HIGH);
-          delay(2000);
-          digitalWrite(STATUS_LED,LOW);
+          blink_n_times(1,STATUS_LED,2000);
         }
       }
     }
@@ -167,87 +168,98 @@ void loop(void) {
       state = lock(!state);
       digitalWrite(STATUS_LED,LOW);
       delay(100);
-
-      for(i=0;i<TOTAL_SLOTS;i++){ // Usefull to know the slot in which the card
-                                  //  is saved :) 
-        if(check_card(uid,i))
-          blink_n_times(i+1,STATUS_LED);
-      }
-    }
-    else{
+      #ifdef DEBUG
+        if(check_card(uid)) blink_n_times(i+1,STATUS_LED,250); 
+      #endif
+    }else{
       #ifdef DEBUG
       Serial.println("Access Denied");
       #endif
     }
     access_granted = 0; //Reset Access
   }
-  if(!digitalRead(SLOT_SELECT)){// Select memory slot
-    while(!digitalRead(SLOT_SELECT));
-    memory_slot = (memory_slot < TOTAL_SLOTS - 1) ? memory_slot + 1 : 0;
-    #ifdef DEBUG
-    Serial.print("Slot selected: ");
-    Serial.println(memory_slot);
-    #endif
-    blink_n_times(memory_slot+1,STATUS_LED);
-  }
-  if(!digitalRead(LOCK_UNLOCK)){// Select slot
+  if(!digitalRead(LOCK_UNLOCK)){// Unlock or lock door
     state = lock(!state);
+  }
+  if(!digitalRead(RESET_MEMORY)){// Swipe memory
+    digitalWrite(STATUS_LED,HIGH);
+    delay(5000);
+    digitalWrite(STATUS_LED,LOW);
+    if(!digitalRead(RESET_MEMORY)){
+      clear_memory();
+      blink_n_times(4,STATUS_LED,100);
+      delay(1000);
+    }
   }
 }
 
-boolean save_delete_card(uint8_t *uid,int addr){
-  /*
-   * If card doesn't exist in any slot, then it is saved in "addr", 
-   *   else it is deleted from memory.
+int check_card(uint8_t *uid){
+  /* 
+   *  Checks if card is saved, returns the address of the card if it saved
+   *  or -1 if it is not found.
    */
-  int i;
-  int j;
-  int memory_offset = SLOT_SIZE*addr;
-  boolean save = 1;
-  
-  for(i=0;i<TOTAL_SLOTS;i++){ //Check if card is saved in any slot
-    if(check_card(uid,i)){
-      save = 0; //Delete if found
+  int i,j;
+  int memory_offset;
+
+  for(i=0;i<TOTAL_SLOTS;i++){
+    memory_offset = i*SLOT_SIZE;
+    for(j=0;j<SLOT_SIZE;j++){
+      if(EEPROM.read(memory_offset+j)!=uid[j]) break;
+    }
+    if(j==SLOT_SIZE){
+      return i;
     }
   }
-  if(save){
-    for(i=0;i<SLOT_SIZE;i++){
-      EEPROM.write(memory_offset+i,uid[i]);
-    }
-    return(1);
-  }else{
-    for(i=0;i<TOTAL_SLOTS;i++){ //Delete card from all slots
-      if(check_card(uid,i)){
-        memory_offset = SLOT_SIZE*i;
-        for(j=0;j<SLOT_SIZE;j++){
-          EEPROM.write(memory_offset+j,0);
-        }
+  return -1;
+}
+int save_card(uint8_t *uid){
+  /* 
+   *  Saves card to empty slot
+   */
+  uint8_t blank_card[] = {0,0,0,0};
+  int card_addr = check_card(uid);// Search card
+  int i, new_addr, memory_offset;
+  if(card_addr == -1){
+    new_addr = check_card(blank_card);// Search for a empty slot
+    if(new_addr != -1){
+      memory_offset = SLOT_SIZE*new_addr;
+      for(i=0;i<SLOT_SIZE;i++){
+        EEPROM.write(memory_offset+i,uid[i]);
       }
     }
-    return(0);
+    return new_addr;
   }
+  return -1;// Already saved
+
 }
-boolean check_card(uint8_t *uid,int addr){
+int delete_card(int addr){
   /* 
-   *  Checks if card (uid) is contained in the designed address (addr)
+   *  Deletes card from memory slot (addr)
    */
-  int i;
   int memory_offset = SLOT_SIZE*addr;
+  int i;
+
   for(i=0;i<SLOT_SIZE;i++){
-    if(EEPROM.read(memory_offset+i)!=uid[i]) return 0;
+    EEPROM.write(memory_offset+i,0);
   }
-  return 1;
 }
-void blink_n_times(int n,int led_pin){
+void clear_memory(void){
+  int i;
+  int total = TOTAL_SLOTS*SLOT_SIZE;
+  for(i=0;i<total;i++){
+    EEPROM.write(i,0);
+  }
+}
+void blink_n_times(int n,int led_pin,int blink_interval){
   /*
-   * Blink n times
+   * Blink led_pin n times for blink_interval
    */
   int i;
   for(i=0;i<n;i++){
     digitalWrite(led_pin,HIGH);
-    delay(250);
+    delay(blink_interval);
     digitalWrite(led_pin,LOW);
-    delay(250);
+    delay(blink_interval);
   }
 }
 
